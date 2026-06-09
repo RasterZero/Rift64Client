@@ -103,6 +103,7 @@ sm11: lda sw_stat
 sw_disable:
 sm12: lda sw_cmd
   ora #%00000010  // disable receive interrupt
+  and #%11111110  // drop DTR line to force hardware modem disconnect/hangup
 sm13: sta sw_cmd
   rts
 
