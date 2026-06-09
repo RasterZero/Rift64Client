@@ -32,7 +32,7 @@
 .const MODEM_TYPE_SWIFTLINK_DF = 3
 
 // --- Named Memory Map Configurations ---
-.const RESTORE_BUF_BASE     = $4000  // Movable high-speed local animation buffer base
+.const CODE_LIMIT           = $4000  // Code + RX ring buffer must end <= $4000 (server upload zone starts here)
 .const SFX_SCRIPT_BASE      = $c000  // Base address for SFX script slots in RAM
 .const SFX_SLOT_SIZE        = 64     // 64 bytes per SFX slot
 .const SFX_SLOT_COUNT       = 16     // 16 slots
@@ -69,6 +69,25 @@ app_start:
   ldx #<title_msg
   ldy #>title_msg
   jsr print_string
+
+  // Print Address 1 (Test Connection) on row 5, column 3
+  lda #3
+  sta cursor_x
+  lda #5
+  sta cursor_y
+  ldx #<addr1_msg
+  ldy #>addr1_msg
+  jsr print_string
+
+  // Print Address 2 (RiftWire IRC) on row 6, column 3
+  lda #3
+  sta cursor_x
+  lda #6
+  sta cursor_y
+  ldx #<addr2_msg
+  ldy #>addr2_msg
+  jsr print_string
+
   // Left-justified example hint above the entry line
   lda #0
   sta cursor_x
@@ -212,7 +231,16 @@ hardware_init:
   sta PlayRoutine+1          // park the music player in its silenced state
   lda #0
   sta audio_mod_loaded       // module RAM is about to be wiped
+
+  // Reset screen base and lookup table to standard $0400 defaults
+  lda #$03
+  sta video_bank_bits
+  lda #$14
+  sta video_d018_value
+  jsr apply_screen_base      // Sets screen_base_hi to $04 and rebuilds screen_hi row table!
+
   // --- All sprites off ---
+  lda #0
   sta $d015                  // sprite enable
   sta $d010                  // sprite X MSB
   sta $d017                  // sprite Y expand
@@ -239,10 +267,10 @@ hardware_init:
   sta $d021                  // background: blue
   // --- Clear screen + color RAM ---
   jsr clear_screen
-  // --- Wipe all free RAM from above the RX ring buffer through $CFFF ---
+  // --- Wipe all free RAM from the server upload zone ($4000) through $CFFF ---
   lda #0
   sta ptr
-  lda #>ram_clear_start
+  lda #$40
   sta ptr+1
 hardware_init_clear_page:
   ldy #0
@@ -429,9 +457,15 @@ dial_buffer:
 title_msg:
   // "RIFT64 CLIENT V1.0 BETA"
   .byte 82,73,70,84,54,52,32,67,76,73,69,78,84,32,86,49,46,48,32,66,69,84,65,0
+addr1_msg:
+  // "RIFT64.COM:64001 - TEST CONNECTION"
+  .byte 82,73,70,84,54,52,46,67,79,77,58,54,52,48,48,49,32,45,32,84,69,83,84,32,67,79,78,78,69,67,84,73,79,78,0
+addr2_msg:
+  // "RIFT64.COM:64002 - RIFTWIRE IRC"
+  .byte 82,73,70,84,54,52,46,67,79,77,58,54,52,48,48,50,32,45,32,82,73,70,84,87,73,82,69,32,73,82,67,0
 example_msg:
-  // "EXAMPLE: 127.0.0.1:64080"
-  .byte 69,88,65,77,80,76,69,58,32,49,50,55,46,48,46,48,46,49,58,54,52,48,56,48,0
+  // "ENTER REMOTE ADDRESS:"
+  .byte 69,78,84,69,82,32,82,69,77,79,84,69,32,65,68,68,82,69,83,83,58,0
 endpoint_label:
   .byte 62,32,0
 connected_msg:
@@ -455,7 +489,8 @@ at_cmd:
 dial_prefix:
   .byte 65,84,68,84,0
 default_endpoint:
-  .byte 49,57,50,46,49,54,56,46,48,46,49,56,56,58,56,48,48,48,0
+  // "rift64.com:64001"
+  .byte 114,105,102,116,54,52,46,99,111,109,58,54,52,48,48,49,0
 client_ready:
   .byte 82,69,65,68,89,13,0
 
@@ -475,7 +510,6 @@ capability_msg:
 .import source "sprite_tool.asm"
 .import source "audio.asm"
 .import source "telemetry_tool.asm"
-.import source "custom_restore.asm"
 
 // ============================================================================
 // MEMORY CONSTRAINT WARNING:
@@ -483,12 +517,14 @@ capability_msg:
 // here right after the compiled code.
 // 1) It MUST be page-aligned (.align $100) because the ACIA driver relies on
 //    natural 8-bit index wrapping (sta ribuf,x).
-// 2) The combined size of all code + ribuf MUST fit below RESTORE_BUF_BASE.
-//    At RESTORE_BUF_BASE, the high-speed local animation player (custom_restore.asm,
-//    used by the O command) begins loading screen buffers.
+// 2) The combined size of all code + ribuf MUST fit below CODE_LIMIT so it
+//    does not run into the server upload zone ($4000-$CFFF). Examples upload
+//    screen RAM to $4000, so the program image + ribuf must end at or before
+//    $4000 or the upload corrupts running firmware.
 // ============================================================================
-.if (* > (RESTORE_BUF_BASE - $100)) {
-  .error "Program size exceeded code limit; ribuf would move to RESTORE_BUF_BASE and overlap custom restore buffers"
+.print "RIFT64 code end (pre-ribuf) = $" + toHexString(*) + "  (target: <= $3F00 to stay under the $4000 upload zone)"
+.if (* > (CODE_LIMIT - $100)) {
+  .error "Program size exceeded code limit; ribuf would overlap the $4000 server upload zone"
 }
 .align $100
 ribuf: .fill 256, 0
