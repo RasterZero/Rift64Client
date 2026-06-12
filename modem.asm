@@ -3,6 +3,11 @@
 // String transmission, receive buffer flushing, dial command building,
 // and modem result token matching (OK, CONNECT, NO CARRIER, etc.).
 
+// Hayes guard time is 1.0s of TX silence; 70 jiffies covers both
+// 60Hz NTSC (1.17s) and 50Hz PAL (1.4s).
+.const HANGUP_GUARD_JIFFIES = 70
+.const HANGUP_RESPONSE_JIFFIES = 30
+
 send_string:
   stx ptr
   sty ptr+1
@@ -19,6 +24,40 @@ send_done:
 flush_rx_buffer:
   jsr sw_getxfer
   bcc flush_rx_buffer
+  rts
+
+// Force any lingering session out of online mode and hang up.
+// A RUN/STOP+RESTORE mid-session leaves tcpser/Hayes modems connected
+// (default profiles ignore the DTR drop in sw_disable), so escape and
+// hang up before every AT handshake.
+modem_hangup_sequence:
+  jsr flush_rx_buffer
+  ldx #HANGUP_GUARD_JIFFIES   // TX silence before escape
+  jsr delay_jiffies
+  lda #43                     // '+'
+  jsr sw_putxfer
+  lda #43
+  jsr sw_putxfer
+  lda #43
+  jsr sw_putxfer
+  ldx #HANGUP_GUARD_JIFFIES   // TX silence after escape
+  jsr delay_jiffies
+  ldx #<hangup_cmd
+  ldy #>hangup_cmd
+  jsr send_string
+  ldx #HANGUP_RESPONSE_JIFFIES
+  jsr delay_jiffies           // let OK/ERROR/NO CARRIER arrive
+  jmp flush_rx_buffer         // discard responses; tail-call rts
+
+// X = jiffies to wait (polls $A2 transitions; IRQ keeps it ticking)
+delay_jiffies:
+dj_next:
+  lda $a2
+dj_same:
+  cmp $a2
+  beq dj_same
+  dex
+  bne dj_next
   rts
 
 build_dial_command:

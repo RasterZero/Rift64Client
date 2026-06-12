@@ -117,6 +117,8 @@ connect_start:
   lda #13
   jsr print_char
 
+  jsr modem_hangup_sequence
+
   ldx #<at_cmd
   ldy #>at_cmd
   jsr send_string
@@ -451,8 +453,8 @@ dial_buffer:
   .fill ENDPOINT_MAX+8, 0
 
 title_msg:
-  // "RIFT64 CLIENT V1.0 BETA"
-  .byte 82,73,70,84,54,52,32,67,76,73,69,78,84,32,86,49,46,48,32,66,69,84,65,0
+  // "RIFT64 CLIENT V1.1 BETA"
+  .byte 82,73,70,84,54,52,32,67,76,73,69,78,84,32,86,49,46,49,32,66,69,84,65,0
 addr1_msg:
   // "RIFT64.COM:64001 - TEST CONNECTION"
   .byte 82,73,70,84,54,52,46,67,79,77,58,54,52,48,48,49,32,45,32,84,69,83,84,32,67,79,78,78,69,67,84,73,79,78,0
@@ -482,6 +484,10 @@ press_key_msg:
 
 at_cmd:
   .byte 65,84,13,0
+hangup_cmd:
+  // "\rATH0\r" — leading CR clears any stray "+++" from the modem's
+  // command buffer when it was already in command mode
+  .byte 13,65,84,72,48,13,0
 dial_prefix:
   .byte 65,84,68,84,0
 default_endpoint:
