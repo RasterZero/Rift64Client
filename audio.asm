@@ -1,49 +1,65 @@
-// audio.asm -- MiniPlayer2 integration wrapper for the RIFT64 client.
+// audio.asm -- AudioBridge wrapper for the RIFT64 client.
 //
-// Wraps player.asm (MiniPlayer2 by Cadaver, ported to KickAssembler).
-// Provides:
+// Front-end for soundbridge.asm (synth + SFX bytecode) and tracker.asm
+// (pattern sequencer). Provides:
 //   - audio_install:  call once at boot. Silences SID and hooks the
-//                     KERNAL IRQ vector ($0314) so PlayRoutine is called
+//                     KERNAL IRQ vector ($0314) so the audio engines tick
 //                     once per jiffy (~50 Hz PAL / 60 Hz NTSC).
-//   - protocol_audio: RIFT64 protocol 'A' command dispatcher. Maps the
-//                     subcommands 0..7 onto the MiniPlayer2 API.
+//   - protocol_audio: RIFT64 protocol 'A' command dispatcher. Digits
+//                     0..7 are tracker transport; letters dispatch to
+//                     SoundBridge and the remote-tracker stream.
 //
 // Memory:
-//   ZP $20..$36  -- MiniPlayer2 state (PLAYER_ZPBASE = $20, 23 bytes)
 //   $0314/$0315  -- hooked by audio_install, old vector chained
 //
-// Protocol subcommands (mapped from the old audio.asm API):
-//   A0 stop      -> PlayRoutine+1 = $ff, silence SID
-//   A1 start     -> read 2 hex chars (subtune index, 1-based);
-//                   PlayRoutine+1 = subtune
-//   A2 pause     -> PlayRoutine+1 = $ff (MiniPlayer2 has no true pause)
-//   A3 resume    -> PlayRoutine+1 = $00 (resumes whatever was last init'd)
-//   A4 tempo     -> ack-and-ignore (tempo is baked into module data)
-//   A5 module    -> read 4 hex chars (page-aligned module address);
-//                   silence, jsr SetMusicData
+// Tracker transport subcommands (digits, wire-compatible with the old
+// MiniPlayer2 commands):
+//   A0 stop      -> tracker stop + release all voices
+//   A1 play      -> read 2 hex chars (start order index, 0-based)
+//   A2 pause     -> tracker pause (position kept, voices keep sustaining)
+//   A3 resume    -> tracker resume from paused position
+//   A4 speed     -> read 2 hex chars (frames per row, 1..31)
+//   A5 bind      -> read 4 hex chars (song base address lo,hi; >= $4000)
 //   A6 volume    -> read 2 hex chars (0..15); write low nibble to $d418
-//   A7 state     -> emit 1 byte: current PlayRoutine+1 value
+//   A7 state     -> emit 1 byte: tracker state
+//
+// Remote tracker / streaming subcommands (letters):
+//   AT mode      -> 01 enter remote (streamed-row) mode, 00 exit
+//   AU rows      -> count n, then n*6 row bytes appended to the ring
+//   AY status    -> emit 5 bytes: state, order, row, buffered, under/over
+//   AJ jump      -> jump to order index at next row boundary
+//   AC insfx     -> per-instrument auto-effect: inst, type, speed, depth
+//   AG filter    -> SID filter: cutoff lo/hi, resonance+routing, mode
+//   AK note      -> note on by note-table index: voice, index, instrument
 
-// =================================================================
-// Player configuration constants (consumed by player.asm)
-// =================================================================
-.import source "player.asm"
 .import source "soundbridge.asm"
+.import source "tracker.asm"
 
 // =================================================================
 // audio_install
-// Silence SID, set player to silenced state, hook KERNAL IRQ vector.
-// Call once at boot, before raster_split or anything else that wraps
-// the $0314 vector.
+// Silence SID, retune the jiffy IRQ to true frame rate, and hook the
+// KERNAL IRQ vector. Call once at boot, before raster_split or
+// anything else that wraps the $0314 vector.
 // =================================================================
 audio_install:
   sei
   // Initialize SoundBridge (zeroes SID registers, clears shadow registers, stops SFX, zeroes ownership)
   jsr soundbridge_reset
 
-  // Put player in silenced state (no module loaded yet)
-  lda #$ff
-  sta PlayRoutine+1
+  // The KERNAL programs CIA1 Timer A for ~60 Hz on BOTH video standards
+  // (the jiffy drives TI$, defined in 1/60 s) -- so on PAL the audio tick
+  // would run 20% fast against the documented 50 frames/sec. Retune the
+  // timer to one PAL frame when the KERNAL's standard flag says PAL;
+  // NTSC keeps 60 Hz (its native frame rate). Period = latch + 1 cycles.
+  lda $02a6                   // 0 = NTSC, 1 = PAL
+  beq _install_keep_60hz
+  lda #<19704                 // 985248 / 50 = 19705 cycles per tick
+  sta $dc04
+  lda #>19704
+  sta $dc05
+  lda #%00010001              // force-load latch + start Timer A, continuous
+  sta $dc0e
+_install_keep_60hz:
 
   // Hook KERNAL IRQ vector
   lda $0314
@@ -60,29 +76,14 @@ audio_install:
 // =================================================================
 // audio_irq
 // Hooked into $0314. KERNAL has already pushed A/X/Y.
-// Performs mode-based dispatch to player and soundbridge SFX tasks.
+// Ticks the tracker, SFX scripts and note effects unless the host has
+// taken the SID for itself (DIRECT mode).
 // =================================================================
 audio_irq:
   lda audio_mode
-  cmp #$00                    // AM00: PLAYER_ONLY
-  beq _call_player_only
-  cmp #$01                    // AM01: SOUNDBRIDGE_ONLY
-  beq _call_sfx_only
-  cmp #$02                    // AM02: MIXED_PLAYER_PLUS_SFX
-  beq _call_mixed
-  jmp _continue_chain         // AM03: DIRECT_SID_MANUAL (no background updates)
-
-_call_player_only:
-  jsr PlayRoutine
-  jmp _continue_chain
-
-_call_sfx_only:
-  jsr sfx_update
-  jsr soundbridge_effects_update
-  jmp _continue_chain
-
-_call_mixed:
-  jsr PlayRoutine
+  cmp #3                      // DIRECT_SID_MANUAL: no background updates
+  beq _continue_chain
+  jsr tracker_update
   jsr sfx_update
   jsr soundbridge_effects_update
 
@@ -94,129 +95,60 @@ audio_old_irq:
 
 // =================================================================
 // Protocol entry: command 'A' (0x41)
-// Dispatches player controls ('0'..'9') or SoundBridge ('A'..'Z').
+// Table-driven dispatch (same scheme as protocol.asm): the subcommand
+// byte is matched against audio_cmd_tbl and the paired handler address
+// is jumped to through an RTS trampoline.
 // =================================================================
+.const AUDIO_CMD_COUNT = 31
+
 protocol_audio:
   jsr protocol_read_byte
   and #$7f                  // Strip parity
-  
-  cmp #'0'
-  bcc audio_invalid
-  
-  cmp #'9'+1
-  bcc audio_player_dispatch
-  
-  cmp #'A'
-  bcc audio_invalid
-  
-  cmp #'Z'+1
-  bcc audio_soundbridge_dispatch
+  ldx #0
+_pa_loop:
+  cmp audio_cmd_tbl,x
+  beq _pa_found
+  inx
+  cpx #AUDIO_CMD_COUNT
+  bne _pa_loop
+  jmp protocol_nak          // Unknown subcommand
+_pa_found:
+  lda audio_hnd_hi,x
+  pha
+  lda audio_hnd_lo,x
+  pha
+  rts
 
-audio_invalid:
-  jmp protocol_nak
+audio_cmd_tbl:
+  .byte '0','1','2','3','4','5','6','7'                          // tracker transport
+  .byte 'T','U','Y','J','C'                                      // remote tracker / status
+  .byte 'R','B','V','M','I','G'                                  // engine control
+  .byte 'N','K','O','F','Q','D','E','W','P'                      // real-time stream
+  .byte 'S','X','Z'                                              // SFX
 
-audio_player_dispatch:
-  cmp #'0'
-  bne !+
-  jmp audio_cmd_stop
-!:
-  cmp #'1'
-  bne !+
-  jmp audio_cmd_start
-!:
-  cmp #'2'
-  bne !+
-  jmp audio_cmd_pause
-!:
-  cmp #'3'
-  bne !+
-  jmp audio_cmd_resume
-!:
-  cmp #'4'
-  bne !+
-  jmp audio_cmd_tempo
-!:
-  cmp #'5'
-  bne !+
-  jmp audio_cmd_module
-!:
-  cmp #'6'
-  bne !+
-  jmp audio_cmd_volume
-!:
-  cmp #'7'
-  bne !+
-  jmp audio_cmd_state
-!:
-  // '8' and '9' are unimplemented player subcommands
-  jmp protocol_nak
+audio_hnd_lo:
+  .byte <(trk_cmd_stop-1),       <(trk_cmd_play-1),        <(trk_cmd_pause-1),    <(trk_cmd_resume-1)
+  .byte <(trk_cmd_speed-1),      <(trk_cmd_bind-1),        <(trk_cmd_volume-1),   <(trk_cmd_state-1)
+  .byte <(trk_cmd_remote-1),     <(trk_cmd_stream-1),      <(trk_cmd_status-1),   <(trk_cmd_jump-1)
+  .byte <(trk_cmd_inst_effect-1)
+  .byte <(sbridge_cmd_reset-1),  <(sbridge_cmd_sfx_base-1),<(sbridge_cmd_volume-1),<(sbridge_cmd_mode-1)
+  .byte <(sbridge_cmd_instrument-1), <(sbridge_cmd_filter-1)
+  .byte <(sbridge_cmd_note_on-1),<(sbridge_cmd_note_idx-1),<(sbridge_cmd_note_off-1),<(sbridge_cmd_full_voice-1)
+  .byte <(sbridge_cmd_freq-1),   <(sbridge_cmd_adsr-1),    <(sbridge_cmd_set_effect-1),<(sbridge_cmd_control-1)
+  .byte <(sbridge_cmd_pulse-1)
+  .byte <(sbridge_cmd_sfx_play-1),<(sbridge_cmd_sfx_stop-1),<(sbridge_cmd_stop_all-1)
 
-audio_soundbridge_dispatch:
-  cmp #'R'
-  bne !+
-  jmp sbridge_cmd_reset
-!:
-  cmp #'B'
-  bne !+
-  jmp sbridge_cmd_sfx_base
-!:
-  cmp #'V'
-  bne !+
-  jmp sbridge_cmd_volume
-!:
-  cmp #'M'
-  bne !+
-  jmp sbridge_cmd_mode
-!:
-  cmp #'I'
-  bne !+
-  jmp sbridge_cmd_instrument
-!:
-  cmp #'N'
-  bne !+
-  jmp sbridge_cmd_note_on
-!:
-  cmp #'O'
-  bne !+
-  jmp sbridge_cmd_note_off
-!:
-  cmp #'F'
-  bne !+
-  jmp sbridge_cmd_full_voice
-!:
-  cmp #'Q'
-  bne !+
-  jmp sbridge_cmd_freq
-!:
-  cmp #'D'
-  bne !+
-  jmp sbridge_cmd_adsr
-!:
-  cmp #'E'
-  bne !+
-  jmp sbridge_cmd_set_effect
-!:
-  cmp #'W'
-  bne !+
-  jmp sbridge_cmd_control
-!:
-  cmp #'P'
-  bne !+
-  jmp sbridge_cmd_pulse
-!:
-  cmp #'S'
-  bne !+
-  jmp sbridge_cmd_sfx_play
-!:
-  cmp #'X'
-  bne !+
-  jmp sbridge_cmd_sfx_stop
-!:
-  cmp #'Z'
-  bne !+
-  jmp sbridge_cmd_stop_all
-!:
-  jmp protocol_nak
+audio_hnd_hi:
+  .byte >(trk_cmd_stop-1),       >(trk_cmd_play-1),        >(trk_cmd_pause-1),    >(trk_cmd_resume-1)
+  .byte >(trk_cmd_speed-1),      >(trk_cmd_bind-1),        >(trk_cmd_volume-1),   >(trk_cmd_state-1)
+  .byte >(trk_cmd_remote-1),     >(trk_cmd_stream-1),      >(trk_cmd_status-1),   >(trk_cmd_jump-1)
+  .byte >(trk_cmd_inst_effect-1)
+  .byte >(sbridge_cmd_reset-1),  >(sbridge_cmd_sfx_base-1),>(sbridge_cmd_volume-1),>(sbridge_cmd_mode-1)
+  .byte >(sbridge_cmd_instrument-1), >(sbridge_cmd_filter-1)
+  .byte >(sbridge_cmd_note_on-1),>(sbridge_cmd_note_idx-1),>(sbridge_cmd_note_off-1),>(sbridge_cmd_full_voice-1)
+  .byte >(sbridge_cmd_freq-1),   >(sbridge_cmd_adsr-1),    >(sbridge_cmd_set_effect-1),>(sbridge_cmd_control-1)
+  .byte >(sbridge_cmd_pulse-1)
+  .byte >(sbridge_cmd_sfx_play-1),>(sbridge_cmd_sfx_stop-1),>(sbridge_cmd_stop_all-1)
 
 // --- SoundBridge Wrappers (Parsers & Dispatchers) ---
 sbridge_cmd_reset:
@@ -245,34 +177,32 @@ sbridge_cmd_mode:
   jmp protocol_nak
 
 sbridge_cmd_instrument:
-  jsr protocol_read_hex_byte
-  sta temp_args+0
-  jsr protocol_read_hex_byte
-  sta temp_args+1
-  jsr protocol_read_hex_byte
-  sta temp_args+2
-  jsr protocol_read_hex_byte
-  sta temp_args+3
-  jsr protocol_read_hex_byte
-  sta temp_args+4
-  jsr protocol_read_hex_byte
-  sta temp_args+5
+  lda #6
+  jsr read_hex_args
   jsr soundbridge_define_instrument
   bcs !+
   jmp protocol_ack
 !:
   jmp protocol_nak
 
+// AG: cutoff lo (0-7), cutoff hi, resonance+routing, filter mode bits
+sbridge_cmd_filter:
+  lda #4
+  jsr read_hex_args
+  jsr soundbridge_set_filter
+  jmp protocol_ack
+
 sbridge_cmd_note_on:
-  jsr protocol_read_hex_byte
-  sta temp_args+0
-  jsr protocol_read_hex_byte
-  sta temp_args+1
-  jsr protocol_read_hex_byte
-  sta temp_args+2
-  jsr protocol_read_hex_byte
-  sta temp_args+3
+  lda #4
+  jsr read_hex_args
   jsr soundbridge_note_on
+  rts                         // No-ACK
+
+// AK: voice, note index (1..95, C-0..B-7), instrument id (1..16)
+sbridge_cmd_note_idx:
+  lda #3
+  jsr read_hex_args
+  jsr soundbridge_note_on_by_index
   rts                         // No-ACK
 
 sbridge_cmd_note_off:
@@ -282,82 +212,44 @@ sbridge_cmd_note_off:
   rts                         // No-ACK
 
 sbridge_cmd_full_voice:
-  jsr protocol_read_hex_byte
-  sta temp_args+0
-  jsr protocol_read_hex_byte
-  sta temp_args+1
-  jsr protocol_read_hex_byte
-  sta temp_args+2
-  jsr protocol_read_hex_byte
-  sta temp_args+3
-  jsr protocol_read_hex_byte
-  sta temp_args+4
-  jsr protocol_read_hex_byte
-  sta temp_args+5
-  jsr protocol_read_hex_byte
-  sta temp_args+6
-  jsr protocol_read_hex_byte
-  sta temp_args+7
+  lda #8
+  jsr read_hex_args
   jsr soundbridge_full_voice_setup
   rts                         // No-ACK
 
 sbridge_cmd_freq:
-  jsr protocol_read_hex_byte
-  sta temp_args+0
-  jsr protocol_read_hex_byte
-  sta temp_args+1
-  jsr protocol_read_hex_byte
-  sta temp_args+2
+  lda #3
+  jsr read_hex_args
   jsr soundbridge_set_frequency
   rts                         // No-ACK
 
 sbridge_cmd_adsr:
-  jsr protocol_read_hex_byte
-  sta temp_args+0
-  jsr protocol_read_hex_byte
-  sta temp_args+1
-  jsr protocol_read_hex_byte
-  sta temp_args+2
+  lda #3
+  jsr read_hex_args
   jsr soundbridge_set_adsr
   rts                         // No-ACK
 
 sbridge_cmd_set_effect:
-  jsr protocol_read_hex_byte
-  sta temp_args+0               // Voice (0..2)
-  jsr protocol_read_hex_byte
-  sta temp_args+1               // Effect Type (0..3)
-  jsr protocol_read_hex_byte
-  sta temp_args+2               // Speed
-  jsr protocol_read_hex_byte
-  sta temp_args+3               // Depth
+  lda #4
+  jsr read_hex_args
   jsr soundbridge_set_effect
   rts                           // No-ACK
 
 sbridge_cmd_control:
-  jsr protocol_read_hex_byte
-  sta temp_args+0
-  jsr protocol_read_hex_byte
-  sta temp_args+1
+  lda #2
+  jsr read_hex_args
   jsr soundbridge_set_control
   rts                         // No-ACK
 
 sbridge_cmd_pulse:
-  jsr protocol_read_hex_byte
-  sta temp_args+0
-  jsr protocol_read_hex_byte
-  sta temp_args+1
-  jsr protocol_read_hex_byte
-  sta temp_args+2
+  lda #3
+  jsr read_hex_args
   jsr soundbridge_set_pulse_width
   rts                         // No-ACK
 
 sbridge_cmd_sfx_play:
-  jsr protocol_read_hex_byte
-  sta temp_args+0
-  jsr protocol_read_hex_byte
-  sta temp_args+1
-  jsr protocol_read_hex_byte
-  sta temp_args+2
+  lda #3
+  jsr read_hex_args
   jsr soundbridge_sfx_play
   bcs !+
   jmp protocol_ack
@@ -373,93 +265,66 @@ sbridge_cmd_stop_all:
   jmp protocol_ack
 
 // --- A0 stop -----------------------------------------------------
-audio_cmd_stop:
-  sei
-  lda #$ff
-  sta PlayRoutine+1
-  cli
-  jsr Play_SilenceSID
+trk_cmd_stop:
+  jsr tracker_stop
   jmp protocol_ack
 
-// --- A1 start (subtune) ------------------------------------------
-// Param: 1 hex byte = subtune index (1..127). 0 not allowed.
-// NAK if no module has been loaded yet (PlayRoutine would read garbage).
-audio_cmd_start:
+// --- A1 play (start order) ---------------------------------------
+// Param: 1 hex byte = orderlist start index (0-based).
+// NAK if no song is bound or the index is past the orderlist end.
+trk_cmd_play:
   jsr protocol_read_hex_byte
-  cmp #1
-  bcc audio_cmd_start_nak
-  cmp #$80
-  bcs audio_cmd_start_nak
-  ldx audio_mod_loaded
-  beq audio_cmd_start_nak
-  sei
-  sta PlayRoutine+1
-  cli
+  sta temp_args+0
+  jsr tracker_play
+  bcs !+
   jmp protocol_ack
-audio_cmd_start_nak:
+!:
   jmp protocol_nak
 
 // --- A2 pause ----------------------------------------------------
-// MiniPlayer2 has no true pause -- silence the player and rely on
-// A3 resume to restart. Position is lost.
-audio_cmd_pause:
-  sei
-  lda #$ff
-  sta PlayRoutine+1
-  cli
-  jsr Play_SilenceSID
+// Position is kept; sustaining voices keep ringing.
+trk_cmd_pause:
+  jsr tracker_pause
   jmp protocol_ack
 
 // --- A3 resume ---------------------------------------------------
-// Sets command byte = $00 (playback ongoing). Only meaningful if a
-// subtune was previously init'd via A1.
-audio_cmd_resume:
-  sei
-  lda #$00
-  sta PlayRoutine+1
-  cli
+trk_cmd_resume:
+  jsr tracker_resume
+  bcs !+
   jmp protocol_ack
-
-// --- A4 tempo (ack-and-ignore) -----------------------------------
-// MiniPlayer2 has no external tempo control; tempo is baked into
-// the module data. Accept and discard for backwards compatibility.
-audio_cmd_tempo:
-  jsr protocol_read_hex_byte
-  jmp protocol_ack
-
-// --- A5 set module address ---------------------------------------
-// Param: 2 hex bytes (low, high) = page-aligned module base address.
-// SetMusicData requires PlayRoutine to be silenced first.
-audio_cmd_module:
-  jsr protocol_read_hex_byte
-  sta audio_mod_lo
-  jsr protocol_read_hex_byte
-  sta audio_mod_hi
-  // Reject if low byte != 0 (must be page-aligned)
-  lda audio_mod_lo
-  bne audio_cmd_module_nak
-  sei
-  lda #$ff
-  sta PlayRoutine+1
-  jsr Play_SilenceSID
-  lda audio_mod_lo
-  ldx audio_mod_hi
-  jsr SetMusicData
-  lda #1
-  sta audio_mod_loaded
-  cli
-  jmp protocol_ack
-audio_cmd_module_nak:
+!:
   jmp protocol_nak
 
-audio_mod_lo:     .byte 0
-audio_mod_hi:     .byte 0
-audio_mod_loaded: .byte 0
+// --- A4 speed ----------------------------------------------------
+// Param: 1 hex byte = frames per row (1..31).
+trk_cmd_speed:
+  jsr protocol_read_hex_byte
+  sta temp_args+0
+  jsr tracker_set_speed
+  bcs !+
+  jmp protocol_ack
+!:
+  jmp protocol_nak
+
+// --- A5 bind song ------------------------------------------------
+// Param: 2 hex bytes (low, high) = song base address. Must point into
+// the server upload zone (high byte >= $40). Stops playback and caches
+// the song header.
+trk_cmd_bind:
+  jsr protocol_read_hex_byte
+  sta temp_args+0
+  jsr protocol_read_hex_byte
+  sta temp_args+1
+  jsr tracker_bind
+  bcs !+
+  jmp protocol_ack
+!:
+  jmp protocol_nak
 
 // --- A6 set volume -----------------------------------------------
 // Param: 1 hex byte (low nibble = volume 0..15). High nibble of
 // $d418 controls filter routing -- preserve it.
-audio_cmd_volume:
+trk_cmd_volume:
   jsr protocol_read_hex_byte
   and #$0f
   sta audio_vol_tmp
@@ -472,11 +337,83 @@ audio_cmd_volume:
 audio_vol_tmp: .byte 0
 
 // --- A7 query state ----------------------------------------------
-// Emits 1 byte: current PlayRoutine+1 (the command/state byte).
-//   $00       playback ongoing
-//   $01..$7f  init pending (subtune index) -- rarely observed
-//   $80..$ff  silenced
-audio_cmd_state:
-  lda PlayRoutine+1
+// Emits 1 byte: 0 stopped, 1 playing (local), 2 paused, 3 remote.
+trk_cmd_state:
+  jsr tracker_query_state
   jsr sw_putxfer
   rts
+
+// --- AT remote mode ----------------------------------------------
+// Param: 1 hex byte: 01 = enter remote (streamed-row) mode, 00 = exit.
+trk_cmd_remote:
+  jsr protocol_read_hex_byte
+  sta temp_args+0
+  jsr tracker_remote_mode
+  bcs !+
+  jmp protocol_ack
+!:
+  jmp protocol_nak
+
+// --- AU stream rows (no ACK) -------------------------------------
+// Params: 1 hex byte frame count n (1..8), then n frames of 6 hex
+// bytes each (one tracker row: note,inst for 3 voices). Frames that
+// do not fit in the ring are dropped and counted as overruns.
+trk_cmd_stream:
+  jsr protocol_read_hex_byte
+  sta trk_stream_n
+  beq trk_stream_done
+trk_stream_frame:
+  lda #6
+  jsr read_hex_args
+  jsr tracker_ring_push
+  dec trk_stream_n
+  bne trk_stream_frame
+trk_stream_done:
+  rts                         // Fire-and-forget, like N/O/F/Q
+
+trk_stream_n: .byte 0
+
+// --- AY status (5 raw bytes) -------------------------------------
+// state, order, row, buffered frame count, (overruns<<4)|underruns.
+trk_cmd_status:
+  jsr tracker_query_state
+  jsr sw_putxfer
+  lda trk_order
+  jsr sw_putxfer
+  lda trk_row
+  jsr sw_putxfer
+  lda trk_ring_count
+  jsr sw_putxfer
+  lda trk_overruns
+  asl
+  asl
+  asl
+  asl
+  ora trk_underruns
+  jsr sw_putxfer
+  rts
+
+// --- AJ jump to order --------------------------------------------
+// Param: 1 hex byte = orderlist index. Takes effect at the next row
+// boundary. Only meaningful during local playback.
+trk_cmd_jump:
+  jsr protocol_read_hex_byte
+  sta temp_args+0
+  jsr tracker_jump
+  bcs !+
+  jmp protocol_ack
+!:
+  jmp protocol_nak
+
+// --- AC per-instrument auto-effect -------------------------------
+// Params: 4 hex bytes: instrument id (1..16), effect type (0..4),
+// speed, depth. Applied by the tracker on every note-on with that
+// instrument; type 0 clears.
+trk_cmd_inst_effect:
+  lda #4
+  jsr read_hex_args
+  jsr tracker_set_inst_effect
+  bcs !+
+  jmp protocol_ack
+!:
+  jmp protocol_nak

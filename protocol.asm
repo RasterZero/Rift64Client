@@ -16,133 +16,59 @@ poll_keyboard:
 poll_keyboard_done:
   rts
 
-// Dispatcher: each entry uses bne+jmp instead of beq to a jump shim, so
-// the branch distance is bounded (always to the next !: label) regardless
-// of how far the target handler lives in the file. Adding new commands
-// here is safe — no relative-branch-too-far risk.
+// Dispatcher: table-driven. A parallel command/handler table is linearly
+// scanned in the SAME priority order as the old cmp/bne/jmp ladder (text first),
+// then control transfers to the handler via an RTS trampoline (push handler-1,
+// rts). This is stack-safe: protocol_handle_byte is jsr'd from protocol_loop and
+// every handler eventually rts's back to it, so pushing the handler address here
+// and rts-ing into it leaves exactly the caller's return address on the stack —
+// the handler's own rts returns to protocol_loop. ~90 bytes smaller than the
+// 29-entry branch ladder, and adding a command is just one row per table.
+.const phb_count = 30
 protocol_handle_byte:
   and #$7f
-  cmp #33
-  bne !+
-  jmp protocol_text
-!:
-  cmp #84
-  bne !+
-  jmp protocol_colored_text
-!:
-  cmp #75
-  bne !+
-  jmp protocol_color
-!:
-  cmp #80
-  bne !+
-  jmp protocol_position
-!:
-  cmp #67
-  bne !+
-  jmp protocol_clear
-!:
-  cmp #87
-  bne !+
-  jmp protocol_window
-!:
-  cmp #86
-  bne !+
-  jmp protocol_colored_window
-!:
-  cmp #66
-  bne !+
-  jmp protocol_border
-!:
-  cmp #83
-  bne !+
-  jmp protocol_save_buffer
-!:
-  cmp #82
-  bne !+
-  jmp protocol_restore_buffer
-!:
-  cmp #69
-  bne !+
-  jmp protocol_erase_line
-!:
-  cmp #77
-  bne !+
-  jmp protocol_memory_store
-!:
-  cmp #89
-  bne !+
-  jmp protocol_sprite_set
-!:
-  cmp #64
-  bne !+
-  jmp protocol_sprite_position
-!:
-  cmp #71
-  bne !+
-  jmp protocol_scroll_region
-!:
-  cmp #72
-  bne !+
-  jmp protocol_cursor_visibility
-!:
-  cmp #63
-  bne !+
-  jmp protocol_capabilities
-!:
-  cmp #76
-  bne !+
-  jmp protocol_length_text
-!:
-  cmp #81
-  bne !+
-  jmp protocol_color_block
-!:
-  cmp #88
-  bne !+
-  jmp protocol_checked_window
-!:
-  cmp #90
-  bne !+
-  jmp protocol_checked_memory
-!:
-  cmp #126
-  bne !+
-  jmp protocol_frame
-!:
-  cmp #70
-  bne !+
-  jmp protocol_charset_bank
-!:
-  cmp #65
-  bne !+
-  jmp protocol_audio
-!:
-  cmp #73
-  bne !+
-  jmp protocol_display_mode
-!:
-  cmp #85
-  bne !+
-  jmp protocol_sprite_mc
-!:
-  cmp #74
-  bne !+
-  jmp protocol_telemetry
-!:
-  cmp #68
-  bne !+
-  jmp protocol_draw_metatile
-!:
-  cmp #78
-  bne !+
-  jmp protocol_raster_split
-!:
-  cmp #79 // ASCII 'O'
-  bne !+
-  jmp protocol_custom_restore
-!:
-  rts
+  ldx #0
+phb_loop:
+  cmp phb_cmd,x
+  beq phb_found
+  inx
+  cpx #phb_count
+  bne phb_loop
+  rts                     // no matching command -> ignore
+phb_found:
+  lda phb_hi,x
+  pha
+  lda phb_lo,x
+  pha
+  rts                     // jumps to (handler-1)+1 = handler
+
+// Command bytes in original ladder order (index 0 checked first = highest prio).
+phb_cmd:
+  .byte 33, 84, 75, 80, 67, 87, 86, 66, 83, 82, 69, 77, 89, 64, 71
+  .byte 72, 63, 76, 81, 88, 90, 126, 70, 65, 73, 85, 74, 68, 78, 79
+// Handler addresses minus 1 (RTS trampoline), same order as phb_cmd.
+phb_lo:
+  .byte <(protocol_text-1),          <(protocol_colored_text-1),   <(protocol_color-1)
+  .byte <(protocol_position-1),      <(protocol_clear-1),          <(protocol_window-1)
+  .byte <(protocol_colored_window-1),<(protocol_border-1),         <(protocol_save_buffer-1)
+  .byte <(protocol_restore_buffer-1),<(protocol_erase_line-1),     <(protocol_memory_store-1)
+  .byte <(protocol_sprite_set-1),    <(protocol_sprite_position-1),<(protocol_scroll_region-1)
+  .byte <(protocol_cursor_visibility-1),<(protocol_capabilities-1),<(protocol_length_text-1)
+  .byte <(protocol_color_block-1),   <(protocol_checked_window-1), <(protocol_checked_memory-1)
+  .byte <(protocol_frame-1),         <(protocol_charset_bank-1),   <(protocol_audio-1)
+  .byte <(protocol_display_mode-1),  <(protocol_sprite_mc-1),      <(protocol_telemetry-1)
+  .byte <(protocol_draw_metatile-1), <(protocol_raster_split-1),   <(protocol_copy_memory-1)
+phb_hi:
+  .byte >(protocol_text-1),          >(protocol_colored_text-1),   >(protocol_color-1)
+  .byte >(protocol_position-1),      >(protocol_clear-1),          >(protocol_window-1)
+  .byte >(protocol_colored_window-1),>(protocol_border-1),         >(protocol_save_buffer-1)
+  .byte >(protocol_restore_buffer-1),>(protocol_erase_line-1),     >(protocol_memory_store-1)
+  .byte >(protocol_sprite_set-1),    >(protocol_sprite_position-1),>(protocol_scroll_region-1)
+  .byte >(protocol_cursor_visibility-1),>(protocol_capabilities-1),>(protocol_length_text-1)
+  .byte >(protocol_color_block-1),   >(protocol_checked_window-1), >(protocol_checked_memory-1)
+  .byte >(protocol_frame-1),         >(protocol_charset_bank-1),   >(protocol_audio-1)
+  .byte >(protocol_display_mode-1),  >(protocol_sprite_mc-1),      >(protocol_telemetry-1)
+  .byte >(protocol_draw_metatile-1), >(protocol_raster_split-1),   >(protocol_copy_memory-1)
 
 protocol_text:
   jsr protocol_read_byte
@@ -1001,24 +927,41 @@ protocol_read_hex_byte:
   ora hex_temp
   rts
 
+// Read A consecutive hex-byte args from the wire into temp_args+0..A-1.
+// A = count (1..8). Loop state is held in memory because protocol_read_hex_byte
+// (-> sw_getxfer) clobbers A/X/Y. Used by the soundbridge command wrappers to
+// collapse repeated `jsr protocol_read_hex_byte / sta temp_args+N` blocks.
+read_hex_args:
+  sta read_args_n
+  lda #0
+  sta read_args_i
+read_hex_args_loop:
+  lda read_args_i
+  cmp read_args_n
+  beq read_hex_args_done
+  jsr protocol_read_hex_byte
+  ldx read_args_i
+  sta temp_args,x
+  inc read_args_i
+  jmp read_hex_args_loop
+read_hex_args_done:
+  rts
+read_args_n: .byte 0
+read_args_i: .byte 0
+
+// Decode one ASCII hex digit ('0'-'9' / 'A'-'F', uppercase) to a nibble in A.
+// The wire only ever carries well-formed uppercase hex (SDK EncodeHexNibble),
+// so a branchless adjust replaces the old digit/letter/clamp cascade:
+//   '0'-'9' ($30-$39): carry clear after cmp #$3a -> straight to `and #$0f`.
+//   'A'-'F' ($41-$46): carry set -> `sbc #$07` maps $41->$3a.. then `and #$0f`.
 protocol_read_hex_nibble:
   jsr protocol_read_byte
   and #$7f
-  cmp #58
-  bcc protocol_hex_digit
-  cmp #65
-  bcc protocol_hex_zero
-  cmp #71
-  bcs protocol_hex_zero
-  sec
-  sbc #55
-  rts
-protocol_hex_digit:
-  sec
-  sbc #48
-  rts
-protocol_hex_zero:
-  lda #0
+  cmp #$3a
+  bcc protocol_hex_mask
+  sbc #$07
+protocol_hex_mask:
+  and #$0f
   rts
 
 // Read hex byte and clamp to 1..40 (screen width). Result in A.
@@ -1141,4 +1084,52 @@ protocol_raster_split:
   jmp protocol_ack
 protocol_rs_disable:
   jsr RS_Disable
+  jmp protocol_ack
+
+.const COPY_SRC_PTR = $f7
+.const COPY_DEST_PTR = $f9
+
+copy_len_hi: .byte 0
+copy_len_lo: .byte 0
+
+protocol_copy_memory:
+  jsr protocol_read_hex_byte
+  sta COPY_SRC_PTR+1
+  jsr protocol_read_hex_byte
+  sta COPY_SRC_PTR
+  jsr protocol_read_hex_byte
+  sta COPY_DEST_PTR+1
+  jsr protocol_read_hex_byte
+  sta COPY_DEST_PTR
+  jsr protocol_read_hex_byte
+  sta copy_len_hi
+  jsr protocol_read_hex_byte
+  sta copy_len_lo
+
+  ldy #0
+copy_page_loop:
+  lda copy_len_hi
+  beq copy_remainder
+copy_page_inner:
+  lda (COPY_SRC_PTR),y
+  sta (COPY_DEST_PTR),y
+  iny
+  bne copy_page_inner
+  inc COPY_SRC_PTR+1
+  inc COPY_DEST_PTR+1
+  dec copy_len_hi
+  jmp copy_page_loop
+
+copy_remainder:
+  lda copy_len_lo
+  beq copy_done
+  ldy #0
+copy_rem_inner:
+  lda (COPY_SRC_PTR),y
+  sta (COPY_DEST_PTR),y
+  iny
+  cpy copy_len_lo
+  bne copy_rem_inner
+
+copy_done:
   jmp protocol_ack
