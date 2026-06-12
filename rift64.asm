@@ -225,12 +225,8 @@ software_reset:
 // app_start) and from the software_reset path. Leaves the program, ZP, stack,
 // screen, hooked IRQ/NMI vectors, the RX ring buffer, and I/O untouched.
 hardware_init:
-  jsr soundbridge_reset      // silence SID, stop SFX, volume 0
+  jsr soundbridge_reset      // stop tracker, silence SID, stop SFX, volume 0
   sei                        // keep IRQ off through the register/RAM reset
-  lda #$ff
-  sta PlayRoutine+1          // park the music player in its silenced state
-  lda #0
-  sta audio_mod_loaded       // module RAM is about to be wiped
 
   // Reset screen base and lookup table to standard $0400 defaults
   lda #$03
