@@ -16,12 +16,12 @@ The client establishes a serial connection using a virtual or physical modem ove
 
 ## Footprint & Optimization
 
-The resident client is built to fit entirely within **Bank 0** of the C64's memory map, leaving the upper VIC banks free for streamed graphics and audio. Reaching that target meant reclaiming a significant amount of space from the larger, pre-beta builds — work carried out with the help of **Claude Code**, Anthropic's agentic coding assistant, which was used to compress the client toward the smallest practical footprint.
+The resident client is built to fit entirely within **Bank 0** of the C64's memory map, leaving the upper VIC banks free for streamed graphics and audio. Reaching that target meant reclaiming a significant amount of space from the larger, pre-beta builds — work carried out with the help of <mark>**Claude Code**</mark>, Anthropic's agentic coding assistant, which was used to compress the client toward the smallest practical footprint.
 
 Getting under the Bank 0 ceiling took two complementary efforts, and neither would have been enough on its own:
 
 - **Removing features that no longer earned their space.** The MiniPlayer2 SID module player was retired in favour of the unified tracker/SoundBridge audio engine, and the 80-column bitmap support and standalone bitmap-drawing routines were dropped entirely.
-- **Tightening the remaining code.** Claude identified redundant paths and more compact implementations throughout the assembly, recovering further bytes across the client.
+- **Tightening the remaining code.** <mark>**Claude**</mark> identified redundant paths and more compact implementations throughout the assembly, recovering further bytes across the client.
 
 Only the combination — the feature reductions together with the low-level optimizations — brought the entire client comfortably inside Bank 0.
 
