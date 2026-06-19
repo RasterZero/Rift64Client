@@ -228,6 +228,7 @@ software_reset:
 // screen, hooked IRQ/NMI vectors, the RX ring buffer, and I/O untouched.
 hardware_init:
   jsr soundbridge_reset      // stop tracker, silence SID, stop SFX, volume 0
+  jsr animator_reset         // stop any animator slots left running from a prior session
   sei                        // keep IRQ off through the register/RAM reset
 
   // Reset screen base and lookup table to standard $0400 defaults
@@ -453,8 +454,8 @@ dial_buffer:
   .fill ENDPOINT_MAX+8, 0
 
 title_msg:
-  // "RIFT64 CLIENT V1.1 BETA"
-  .byte 82,73,70,84,54,52,32,67,76,73,69,78,84,32,86,49,46,49,32,66,69,84,65,0
+  // "RIFT64 CLIENT V1.2 BETA"
+  .byte 82,73,70,84,54,52,32,67,76,73,69,78,84,32,86,49,46,50,32,66,69,84,65,0
 addr1_msg:
   // "RIFT64.COM:64001 - TEST CONNECTION"
   .byte 82,73,70,84,54,52,46,67,79,77,58,54,52,48,48,49,32,45,32,84,69,83,84,32,67,79,78,78,69,67,84,73,79,78,0
@@ -511,6 +512,7 @@ capability_msg:
 .import source "memory_store.asm"
 .import source "sprite_tool.asm"
 .import source "audio.asm"
+.import source "animator.asm"
 .import source "telemetry_tool.asm"
 
 // ============================================================================

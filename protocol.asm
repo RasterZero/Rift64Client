@@ -24,7 +24,7 @@ poll_keyboard_done:
 // and rts-ing into it leaves exactly the caller's return address on the stack —
 // the handler's own rts returns to protocol_loop. ~90 bytes smaller than the
 // 29-entry branch ladder, and adding a command is just one row per table.
-.const phb_count = 30
+.const phb_count = 31
 protocol_handle_byte:
   and #$7f
   ldx #0
@@ -46,6 +46,7 @@ phb_found:
 phb_cmd:
   .byte 33, 84, 75, 80, 67, 87, 86, 66, 83, 82, 69, 77, 89, 64, 71
   .byte 72, 63, 76, 81, 88, 90, 126, 70, 65, 73, 85, 74, 68, 78, 79
+  .byte 35                  // '#' -> protocol_animator (local block-copy animator)
 // Handler addresses minus 1 (RTS trampoline), same order as phb_cmd.
 phb_lo:
   .byte <(protocol_text-1),          <(protocol_colored_text-1),   <(protocol_color-1)
@@ -58,6 +59,7 @@ phb_lo:
   .byte <(protocol_frame-1),         <(protocol_charset_bank-1),   <(protocol_audio-1)
   .byte <(protocol_display_mode-1),  <(protocol_sprite_mc-1),      <(protocol_telemetry-1)
   .byte <(protocol_draw_metatile-1), <(protocol_raster_split-1),   <(protocol_copy_memory-1)
+  .byte <(protocol_animator-1)
 phb_hi:
   .byte >(protocol_text-1),          >(protocol_colored_text-1),   >(protocol_color-1)
   .byte >(protocol_position-1),      >(protocol_clear-1),          >(protocol_window-1)
@@ -69,6 +71,7 @@ phb_hi:
   .byte >(protocol_frame-1),         >(protocol_charset_bank-1),   >(protocol_audio-1)
   .byte >(protocol_display_mode-1),  >(protocol_sprite_mc-1),      >(protocol_telemetry-1)
   .byte >(protocol_draw_metatile-1), >(protocol_raster_split-1),   >(protocol_copy_memory-1)
+  .byte >(protocol_animator-1)
 
 protocol_text:
   jsr protocol_read_byte

@@ -61,6 +61,9 @@ audio_install:
   sta $dc0e
 _install_keep_60hz:
 
+  // Mark all animator slots inert before the IRQ that ticks them is hooked.
+  jsr animator_reset
+
   // Hook KERNAL IRQ vector
   lda $0314
   sta audio_old_irq+0
@@ -80,6 +83,7 @@ _install_keep_60hz:
 // taken the SID for itself (DIRECT mode).
 // =================================================================
 audio_irq:
+  jsr animator_tick           // local byte/sprite/glyph animation (audio-mode independent)
   lda audio_mode
   cmp #3                      // DIRECT_SID_MANUAL: no background updates
   beq _continue_chain
