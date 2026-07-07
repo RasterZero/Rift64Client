@@ -2,11 +2,13 @@
 //
 // Memory layout:
 //   $0400-$07FF  Screen RAM (VIC)
-//   $0801-$37FF  Program code + data
-//   $3800-$3FFF  Sprite data (32 blocks, VIC bank 3)
-//   $4000-$CFFF  Server upload zone (bitmaps, fonts, music, metatiles)
-//   $A000-$AFFF  Screen save buffers (BASIC ROM banked out)
-//   $2B00-$2BFF  Serial RX ring buffer (allocated dynamically at the end of code)
+//   $0801-.....  Program code + data; the 256-byte serial RX ring buffer is
+//                page-aligned immediately after the code, and code + ring must
+//                end at or below $4000 (CODE_LIMIT guard at the end of this file)
+//   $4000-$CFFF  Server upload zone (bitmaps, fonts, music, metatiles);
+//                wiped to zero by hardware_init on every connect/reset
+//   $A000-$AF9F  Screen save buffers inside the zone (BASIC ROM banked out)
+//   $C000-$C3FF  Default SFX/drum script bank (16 x 64-byte slots, movable via AB)
 //
 // Load and run with: LOAD "RIFT64",8,1 then RUN
 //
