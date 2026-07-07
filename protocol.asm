@@ -994,7 +994,7 @@ clamp_to_one:
 .import source "metatile.asm"
 .import source "raster_split.asm"
 
-// D command: Draw metatile window. All 17 args are ASCII hex pairs.
+// D command: Draw metatile window. All 22 args are ASCII hex pairs.
 //   D mode mapPtrLo mapPtrHi mapW mapH metaPtrHi
 //     tgtPtrLo tgtPtrHi stride winW winH x y offX offY fillChar
 //     colorMode colorTgtLo colorTgtHi colorSrcLo colorSrcHi colorFill

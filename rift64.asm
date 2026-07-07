@@ -512,7 +512,17 @@ valid_token:
 no_carrier_token:
   .byte 78,79,32,67,65,82,82,73,69,82,0
 capability_msg:
-  .byte 82,73,70,84,54,52,32,67,75,80,76,81,88,90,126,70,73,68,89,64,85,71,72,78,65,32,65,67,75,13,0
+  // "RIFT64 V1.2 !#?@ABCDEFGHIJKLMNOPQRSTUVWXYZ~ ACK\r"
+  // Version token (V1.2) is parsed by the SDK's ExtractClientVersion; the
+  // letter list is the FULL command dispatch set (phb_cmd) -- keep both in
+  // sync when adding commands or bumping the version.
+  .byte 82,73,70,84,54,52,32                                    // "RIFT64 "
+  .byte 86,49,46,50,32                                          // "V1.2 "
+  .byte 33,35,63,64                                             // "!#?@"
+  .byte 65,66,67,68,69,70,71,72,73,74,75,76,77                  // "A-M"
+  .byte 78,79,80,81,82,83,84,85,86,87,88,89,90                  // "N-Z"
+  .byte 126                                                     // "~"
+  .byte 32,65,67,75,13,0                                        // " ACK\r"
 
 .import source "rs232_swfitlink.asm"
 .import source "memory_store.asm"
