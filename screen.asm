@@ -77,8 +77,10 @@ print_char:
   cmp #$7f
   bcs print_dot
   jsr ascii_to_screen_code
-  pha
   ldx cursor_y
+  cpx #25
+  bcs print_done_char       // row off-screen: drop char, never index past the 25-row tables
+  pha
   lda screen_lo,x
   sta screen_store+1
   lda screen_hi,x

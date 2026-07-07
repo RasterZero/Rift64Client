@@ -51,6 +51,10 @@ start:
   and #$fe              // clear bit 0 (BASIC ROM off)
   sta $01
   jsr audio_install
+  // Pre-fill the endpoint field with the default address on cold boot only.
+  // app_start is re-entered on every disconnect/reset and must NOT reload it,
+  // so a user-edited endpoint persists across reconnects.
+  jsr load_default_endpoint
 
 app_start:
   lda #0
