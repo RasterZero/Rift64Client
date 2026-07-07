@@ -22,8 +22,13 @@
 //   #C  Configure : slot, loops, tgtLo, tgtHi, srcLo, srcHi, blockLen,
 //                   totalFrames, frameDelay   (9 hex bytes) -> ACK/NAK
 //   #A  Action    : action, slotMaskLo, slotMaskHi          (3 hex bytes) -> ACK
+//                   Action 2 (Goto) appends a 4th hex byte: the target frame.
 //   #Z  Stop-all  : (no args)                                              -> ACK
-// Actions: 0 Stop, 1 Start, 2 Restart(=Start), 3 Pause, 4 Resume.
+// Actions: 0 Stop, 1 Start, 2 Goto(frame), 3 Pause, 4 Resume.
+//   Goto seeks the masked slots to the given frame (clamped to the last
+//   frame), draws it once, and leaves them STOPPED (RUNNING+PAUSED clear,
+//   CONFIGURED kept) -- the "settle on a rest pose" primitive that Start
+//   (which resets to frame 0 and runs) can't express.
 //
 // All addresses are little-endian on the wire (low byte first), matching the
 // newer D/A commands.
@@ -182,6 +187,14 @@ anim_cmd_action:
   sta anim_act_work_lo          // mask low
   jsr protocol_read_hex_byte
   sta anim_act_work_hi          // mask high
+  // Goto (action 2) carries a trailing target-frame argument; every other
+  // action stops at the mask, keeping the historic 3-byte wire format.
+  lda anim_act_action
+  cmp #2
+  bne anim_act_have_args
+  jsr protocol_read_hex_byte
+  sta anim_act_frame
+anim_act_have_args:
   ldx #0
 anim_act_loop:
   lsr anim_act_work_hi          // shift 16-bit mask right; LSB (slot X) -> C
@@ -201,7 +214,7 @@ anim_apply_action:
   cmp #1
   beq anim_act_start            // 1 = Start
   cmp #2
-  beq anim_act_start            // 2 = Restart == Start (first implementation)
+  beq anim_act_goto             // 2 = Goto: seek to frame, emit once, stay stopped
   cmp #3
   beq anim_act_pause            // 3 = Pause
   cmp #4
@@ -259,6 +272,66 @@ anim_act_resume:
   ora #ANIM_RUNNING             // set RUNNING
   sta anim_flags,x
 anim_act_resume_done:
+  rts
+
+// Seek slot X to anim_act_frame, draw that frame once, leave it stopped.
+// Requires the slot to be CONFIGURED (ignored otherwise, like Start). The
+// running source pointer is repositioned to srcBase + frame*blockLen so a
+// later Start/Resume is coherent, then anim_emit_slot paints the frame. The
+// multiply uses Y as the bit counter so X stays = slot throughout; the emit
+// shares self-modified copy code with the IRQ tick, so it runs under sei.
+anim_act_goto:
+  lda anim_flags,x
+  and #ANIM_CONFIGURED
+  bne anim_act_goto_ok
+  rts                           // not configured -> ignore
+anim_act_goto_ok:
+  // Clamp requested frame to [0, total-1].
+  lda anim_act_frame
+  cmp anim_total,x
+  bcc anim_act_goto_frame_ok
+  lda anim_total,x
+  sec
+  sbc #1
+anim_act_goto_frame_ok:
+  sta anim_curframe,x           // land on this frame
+  sta anim_mul_tmp              // multiplier copy (destroyed by the loop)
+  lda #0
+  sta anim_prod_lo
+  sta anim_prod_hi
+  ldy #8
+anim_act_goto_mul:
+  asl anim_prod_lo
+  rol anim_prod_hi
+  asl anim_mul_tmp              // multiplier MSB -> C
+  bcc anim_act_goto_mul_skip
+  clc
+  lda anim_prod_lo
+  adc anim_blocklen,x
+  sta anim_prod_lo
+  lda anim_prod_hi
+  adc #0
+  sta anim_prod_hi
+anim_act_goto_mul_skip:
+  dey
+  bne anim_act_goto_mul
+  // src_ptr = src_base + frame*blockLen (config validation keeps this <= $FFFF)
+  clc
+  lda anim_src_base_lo,x
+  adc anim_prod_lo
+  sta anim_src_ptr_lo,x
+  lda anim_src_base_hi,x
+  adc anim_prod_hi
+  sta anim_src_ptr_hi,x
+  lda #0
+  sta anim_delayctr,x
+  sta anim_loopdone,x
+  sei
+  jsr anim_emit_slot            // draw the frame (X preserved)
+  lda anim_flags,x
+  and #%11111001                // clear RUNNING + PAUSED, keep CONFIGURED
+  sta anim_flags,x
+  cli
   rts
 
 // ---------------------------------------------------------------------
@@ -429,5 +502,6 @@ anim_sum_hi:   .byte 0
 anim_act_action:  .byte 0
 anim_act_work_lo: .byte 0
 anim_act_work_hi: .byte 0
+anim_act_frame:   .byte 0
 
 anim_emit_len: .byte 0
